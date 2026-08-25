@@ -84,6 +84,26 @@ def test_generation_and_model_eos_ids_are_deduplicated(tmp_path: Path) -> None:
     ]
 
 
+def test_qwen38_eos_ids_come_from_metadata_without_name_allowlist(
+    tmp_path: Path,
+) -> None:
+    _write_config(
+        tmp_path,
+        {
+            "model_type": "qwen3_8",
+            "architectures": ["Qwen3_8ForCausalLM"],
+        },
+    )
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": [248046, 248044]})
+    )
+
+    assert get_eos_token_ids_for_model(ModelId("org/renamed-latest-qwen"), tmp_path) == [
+        248046,
+        248044,
+    ]
+
+
 def test_gemma_metadata_adds_turn_terminators(tmp_path: Path) -> None:
     _write_config(
         tmp_path,
