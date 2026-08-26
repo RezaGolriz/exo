@@ -150,6 +150,50 @@ def test_missing_kimi_slow_tokenizer_uses_fast_path(
     assert calls == [(tmp_path, {"trust_remote_code": False}, [163586])]
 
 
+def test_kimi_k3_uses_native_xtml_tokenizer_path(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    _write_config(
+        tmp_path,
+        {
+            "model_type": "kimi_k3",
+            "architectures": ["KimiK3ForConditionalGeneration"],
+            "eos_token_id": 163585,
+        },
+    )
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "TikTokenTokenizer",
+                "auto_map": {
+                    "AutoTokenizer": ["tokenization_kimi.TikTokenTokenizer", None]
+                },
+            }
+        )
+    )
+    (tmp_path / "tokenization_kimi.py").write_text("raise AssertionError")
+    sentinel = object()
+    calls: list[tuple[Path, dict[str, object], list[int] | None]] = []
+
+    def fake_load_tokenizer(
+        model_path: Path,
+        *,
+        tokenizer_config_extra: dict[str, object],
+        eos_token_ids: list[int] | None,
+    ):
+        calls.append((model_path, tokenizer_config_extra, eos_token_ids))
+        return sentinel
+
+    monkeypatch.setattr(utils_mlx, "load_tokenizer", fake_load_tokenizer)
+
+    result = utils_mlx.load_tokenizer_for_model_id(
+        ModelId("org/renamed-kimi"), tmp_path, trust_remote_code=True
+    )
+
+    assert result is sentinel
+    assert calls == [(tmp_path, {"trust_remote_code": True}, [163585])]
+
+
 def test_repo_metadata_cannot_enable_remote_tokenizer_code(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

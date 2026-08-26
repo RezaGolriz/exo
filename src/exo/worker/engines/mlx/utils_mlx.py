@@ -323,6 +323,13 @@ class LocalModelMetadata:
             )
         )
 
+    @property
+    def is_kimi_k3(self) -> bool:
+        return self.outer_model_type == "kimi_k3" or any(
+            architecture.startswith("KimiK3")
+            for architecture in self.outer_architectures
+        )
+
 
 def _read_local_json_object(path: Path) -> dict[str, Any] | None:
     try:
@@ -504,6 +511,7 @@ def load_tokenizer_for_model_id(
     if (
         trust_remote_code
         and is_kimi
+        and not metadata.is_kimi_k3
         and metadata.uses_kimi_slow_tokenizer
         and (model_path / "tokenization_kimi.py").is_file()
     ):

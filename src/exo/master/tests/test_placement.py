@@ -94,6 +94,26 @@ def place_instance_command(model_card: ModelCard) -> PlaceInstance:
     )
 
 
+def test_pipeline_placement_rejects_tensor_only_model(model_card: ModelCard) -> None:
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    tensor_only = model_card.model_copy(update={"supports_pipeline": False})
+
+    with pytest.raises(
+        ValueError,
+        match="Requested Pipeline sharding but this model does not support pipeline parallelism",
+    ):
+        place_instance(
+            place_instance_command(tensor_only),
+            topology,
+            {},
+            {node_id: create_node_memory(100_000_000)},
+            {node_id: create_node_network()},
+            {node_id: [Backend.MlxMetal]},
+        )
+
+
 @pytest.mark.parametrize(
     "available_memory,total_layers,expected_layers",
     [

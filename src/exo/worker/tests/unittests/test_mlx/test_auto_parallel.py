@@ -13,6 +13,7 @@ from exo.worker.engines.mlx.auto_parallel import (
     PipelineFirstLayer,
     PipelineLastLayer,
     patch_pipeline_model,
+    tensor_auto_parallel,
 )
 from exo.worker.tests.unittests.test_mlx.conftest import MockLayer
 
@@ -91,6 +92,34 @@ def test_missing_attribute_raises() -> None:
 
     with pytest.raises(AttributeError):
         _ = wrapped.nonexistent_attr  # type: ignore[attr-defined]
+
+
+def test_kimi_k3_uses_model_owned_tensor_sharding() -> None:
+    class Model(mlx_nn.Module):
+        model_type = "kimi_k3"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = [mlx_nn.Identity()]
+            self.shard_calls = 0
+
+        def shard(self, group: mx.distributed.Group) -> None:
+            assert group.size() == 1
+            self.shard_calls += 1
+
+        def __call__(self, x: mx.array) -> mx.array:
+            return x
+
+    Model.__module__ = "mlx_lm.models.kimi_k3"
+    model = Model()
+    group = mx.distributed.init()
+
+    responses = list(tensor_auto_parallel(model, group))
+
+    assert model.shard_calls == 1
+    assert len(responses) == 1
+    assert responses[0].layers_loaded == 1
+    assert responses[0].total == 1
 
 
 def test_composed_call_works() -> None:

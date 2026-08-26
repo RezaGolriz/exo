@@ -160,6 +160,7 @@ class ModelCard(FrozenModel):
     n_layers: PositiveInt
     hidden_size: PositiveInt
     supports_tensor: bool
+    supports_pipeline: bool = True
     num_key_value_heads: PositiveInt | None = None
     tasks: list[ModelTask]
     components: list[ComponentInfo] | None = None
@@ -172,13 +173,14 @@ class ModelCard(FrozenModel):
     context_length: int = 0
     uses_cfg: bool = False
     trust_remote_code: bool = True
+    autodetect_vision: bool = True
     is_custom: bool = False
     vision: VisionCardConfig | None = None
     sampling_defaults: SamplingDefaults = Field(default_factory=SamplingDefaults)
 
     @model_validator(mode="after")
     def _autodetect_vision(self) -> "ModelCard":
-        if self.vision is None:
+        if self.autodetect_vision and self.vision is None:
             detected = detect_vision_from_config(self.model_id)
             if detected is not None:
                 object.__setattr__(self, "vision", detected)
@@ -300,6 +302,7 @@ class ConfigData(BaseModel):
             ["Step3p5ForCausalLM"],
             ["NemotronHForCausalLM"],
             ["Gemma4ForConditionalGeneration"],
+            ["KimiLinearForCausalLM"],
         ]
 
     @model_validator(mode="before")

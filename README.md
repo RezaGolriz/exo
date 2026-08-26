@@ -224,6 +224,11 @@ exo follows the [XDG Base Directory Specification](https://specifications.freede
 - **Log files**: `~/.cache/exo/exo_log/` (with automatic log rotation)
 - **Custom model cards**: `~/.local/share/exo/custom_model_cards/`
 
+Model cards may set `supports_pipeline = false` when an architecture is safe only
+with tensor parallelism. Multimodal Hugging Face configs that use a text-only EXO
+runtime may set `autodetect_vision = false` so a restart does not enable an
+unsupported vision path from local metadata.
+
 You can override these locations by setting the corresponding XDG environment variables.
 
 ### macOS App

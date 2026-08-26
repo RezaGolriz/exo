@@ -95,6 +95,26 @@ class _LayerCallable(Protocol):
     def __call__(self, x: mx.array, *args: object, **kwargs: object) -> mx.array: ...
 
 
+class _NativeTensorParallelModel(Protocol):
+    """Model-owned sharding contract used by architectures that EXO must not rewrite."""
+
+    layers: list[nn.Module]
+
+    def shard(self, group: mx.distributed.Group) -> None: ...
+
+
+def _is_kimi_k3_model(model: nn.Module) -> bool:
+    """Identify mlx-lm's K3 wrapper without making older mlx-lm pins unimportable."""
+
+    cls = type(model)
+    return (
+        cls.__module__ == "mlx_lm.models.kimi_k3"
+        and cls.__name__ == "Model"
+        and getattr(model, "model_type", None) == "kimi_k3"
+        and callable(getattr(model, "shard", None))
+    )
+
+
 class CustomMlxLayer(nn.Module):
     """Base class for replacing an MLX layer with a custom implementation."""
 
@@ -483,6 +503,13 @@ def tensor_auto_parallel(
     )
 
     n = group.size()
+
+    if _is_kimi_k3_model(model):
+        native_model = cast(_NativeTensorParallelModel, cast(object, model))
+        total = len(native_model.layers)
+        native_model.shard(group)
+        yield ModelLoadingResponse(layers_loaded=total, total=total)
+        return patch_tensor_model(model)
 
     def _sharded_to_all(path: str, weight: mx.array):
         if path.endswith("bias"):

@@ -130,6 +130,12 @@ def place_instance(
     if len(cycles_with_sufficient_memory) == 0:
         raise ValueError("No cycles found with sufficient memory")
 
+    if command.sharding == Sharding.Pipeline and not command.model_card.supports_pipeline:
+        raise ValueError(
+            f"Requested Pipeline sharding but this model does not support "
+            f"pipeline parallelism: {command.model_card.model_id}"
+        )
+
     if command.sharding == Sharding.Tensor:
         if not command.model_card.supports_tensor:
             raise ValueError(
