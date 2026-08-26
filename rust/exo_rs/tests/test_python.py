@@ -1,28 +1,29 @@
 import asyncio
 import os
+from contextlib import suppress
 
 import pytest
 from _pytest.capture import CaptureFixture
-from exo_rs import (
-    NetworkingHandle,
-    Pidfile,
-    FromSwarm,
-)
+from exo_rs import FromSwarm, NetworkingHandle, Pidfile
 
 
 @pytest.mark.asyncio
 async def test_sleep_on_multiple_items() -> None:
     print("PYTHON: starting handle")
-    h = NetworkingHandle.new(os.urandom(16).hex().lstrip("0"), 52414, 52413)
+    h = NetworkingHandle.new(os.urandom(16).hex().lstrip("0"), "exo-test", 52414, 52413)
     print("PYTHON: handle started")
 
-    rt = asyncio.create_task(_await_recv(h))
+    recv_task = asyncio.create_task(_await_recv(h))
+    try:
+        # sleep for 4 ticks
+        for _i in range(10):
+            await asyncio.sleep(1)
 
-    # sleep for 4 ticks
-    for i in range(10):
-        await asyncio.sleep(1)
-
-        await h.gossipsub_publish("topic", b"somehting or other")
+            await h.gossipsub_publish("topic", b"somehting or other")
+    finally:
+        recv_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await recv_task
 
 
 def test_pidfile(capsys: CaptureFixture[str]):
@@ -43,7 +44,7 @@ async def _await_recv(h: NetworkingHandle):
 
 
 def scoped_lock_file():
-    a = Pidfile("/tmp/lock.pid", 0o0600)
+    _pidfile = Pidfile("/tmp/lock.pid", 0o0600)
 
 
 if __name__ == "__main__":

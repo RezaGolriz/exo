@@ -122,6 +122,79 @@ def test_kimi_k3_uses_model_owned_tensor_sharding() -> None:
     assert responses[0].total == 1
 
 
+def test_installed_kimi_k3_runs_through_exo_tensor_path() -> None:
+    from mlx_lm.models.cache import ArraysCache, KVCache
+    from mlx_lm.models.kimi_k3 import Model, ModelArgs
+
+    args = ModelArgs(
+        text_config={
+            "model_type": "kimi_linear",
+            "vocab_size": 128,
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "intermediate_size": 96,
+            "rms_norm_eps": 1e-5,
+            "hidden_act": "situ",
+            "activation_situ_beta": 4.0,
+            "activation_situ_linear_beta": 25.0,
+            "linear_attn_config": {
+                "kda_layers": [1],
+                "full_attn_layers": [2],
+                "num_heads": 2,
+                "head_dim": 32,
+                "short_conv_kernel_size": 4,
+                "gate_lower_bound": -5.0,
+                "use_full_rank_gate": True,
+            },
+            "num_experts": 4,
+            "moe_intermediate_size": 32,
+            "q_lora_rank": 24,
+            "kv_lora_rank": 16,
+            "qk_nope_head_dim": 16,
+            "qk_rope_head_dim": 8,
+            "v_head_dim": 16,
+            "mla_use_nope": True,
+            "mla_use_output_gate": True,
+            "num_experts_per_token": 2,
+            "num_shared_experts": 1,
+            "first_k_dense_replace": 1,
+            "routed_expert_hidden_size": 32,
+            "latent_moe_use_norm": True,
+            "attn_res_block_size": 2,
+        },
+    )
+    mx.random.seed(17)
+    model = Model(args)
+    tokens = mx.array([[2, 7, 11, 19]], dtype=mx.int32)
+    expected = model(tokens)
+    mx.eval(expected)
+
+    original_call = Model.__call__
+    try:
+        responses = list(tensor_auto_parallel(model, mx.distributed.init()))
+        assert Model.__call__ is not original_call
+        actual = model(tokens)
+        cache = model.make_cache()
+        assert isinstance(cache[0], ArraysCache)
+        assert isinstance(cache[1], KVCache)
+        prefilled = model(tokens[:, :3], cache=cache)
+        decoded = model(tokens[:, 3:4], cache=cache)
+        mx.eval(actual, prefilled, decoded)
+        assert decoded.shape == expected[:, -1:].shape
+        assert cache[1].offset == tokens.shape[1]
+    finally:
+        Model.__call__ = original_call
+
+    assert [(response.layers_loaded, response.total) for response in responses] == [
+        (2, 2)
+    ]
+    assert mx.allclose(actual, expected, rtol=1e-5, atol=1e-5).item()
+    assert mx.allclose(prefilled, expected[:, :3], rtol=1e-5, atol=1e-5).item()
+    assert mx.allclose(decoded, expected[:, -1:], rtol=1e-5, atol=1e-5).item()
+
+
 def test_composed_call_works() -> None:
     ctx = mp.get_context("spawn")
 
