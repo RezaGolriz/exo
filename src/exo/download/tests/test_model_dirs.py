@@ -295,3 +295,62 @@ class TestDeleteModel:
     ) -> None:
         result = await delete_model(MODEL_ID)
         assert result is False
+
+    @pytest.mark.parametrize(
+        "malicious_model_id",
+        [".", "..", "org/../model", "../model", "model\\..", "model\nname"],
+    )
+    async def test_rejects_unsafe_model_ids_without_deleting(
+        self,
+        dirs: tuple[Path, Path, Path],
+        malicious_model_id: str,
+    ) -> None:
+        w1, _, _ = dirs
+        sentinel = w1.parent / "sentinel.txt"
+        sentinel.write_text("keep")
+
+        result = await delete_model(ModelId(malicious_model_id))
+
+        assert result is False
+        assert sentinel.read_text() == "keep"
+
+    async def test_rejects_symlinked_model_directory(
+        self, dirs: tuple[Path, Path, Path]
+    ) -> None:
+        w1, _, _ = dirs
+        victim = w1.parent / "victim"
+        victim.mkdir()
+        sentinel = victim / "sentinel.txt"
+        sentinel.write_text("keep")
+        (w1 / NORMALIZED).symlink_to(victim, target_is_directory=True)
+
+        result = await delete_model(MODEL_ID)
+
+        assert result is False
+        assert sentinel.read_text() == "keep"
+        assert (w1 / NORMALIZED).is_symlink()
+
+    async def test_deletion_continues_after_one_directory_fails(
+        self, dirs: tuple[Path, Path, Path]
+    ) -> None:
+        w1, w2, default = dirs
+        first = w1 / NORMALIZED
+        second = w2 / NORMALIZED
+        cache = default / "caches" / NORMALIZED
+        for directory in (first, second, cache):
+            directory.mkdir(parents=True)
+
+        real_rmtree = shutil.rmtree
+
+        def selective_rmtree(path: Path, *, ignore_errors: bool) -> None:
+            if path == first:
+                raise PermissionError("denied")
+            real_rmtree(path, ignore_errors=ignore_errors)
+
+        with patch("shutil.rmtree", side_effect=selective_rmtree):
+            result = await delete_model(MODEL_ID)
+
+        assert result is True
+        assert first.exists()
+        assert not second.exists()
+        assert not cache.exists()

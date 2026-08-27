@@ -29,9 +29,29 @@ class SystemId(Id):
     pass
 
 
+class InvalidModelIdError(ValueError):
+    pass
+
+
 class ModelId(Id):
     def normalize(self) -> str:
         return self.replace("/", "--")
+
+    def normalized_for_filesystem(self) -> str:
+        """Return a safe single-directory representation of this model ID."""
+        raw = str(self)
+        if "\\" in raw or any(
+            ord(character) < 32 or ord(character) == 127 for character in raw
+        ):
+            raise InvalidModelIdError("Model ID contains an unsafe character")
+
+        if any(segment in {"", ".", ".."} for segment in raw.split("/")):
+            raise InvalidModelIdError("Model ID contains an unsafe path segment")
+
+        normalized = self.normalize()
+        if normalized in {"", ".", ".."} or "/" in normalized or "\\" in normalized:
+            raise InvalidModelIdError("Model ID does not map to one directory")
+        return normalized
 
     def short(self) -> str:
         return self.split("/")[-1]

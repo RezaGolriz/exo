@@ -28,7 +28,7 @@ from exo.shared.types.commands import (
     ForwarderDownloadCommand,
     StartDownload,
 )
-from exo.shared.types.common import NodeId
+from exo.shared.types.common import InvalidModelIdError, NodeId
 from exo.shared.types.events import (
     Event,
     NodeDownloadProgress,
@@ -317,6 +317,13 @@ class DownloadCoordinator:
         self.active_downloads[model_id] = scope
 
     async def _delete_download(self, model_id: ModelId) -> None:
+        try:
+            model_id.normalized_for_filesystem()
+        except InvalidModelIdError:
+            safe_model_id = repr(str(model_id)[:120])
+            logger.warning(f"Refusing unsafe model deletion command {safe_model_id}")
+            return
+
         # Protect read-only models from deletion
         if model_id in self.download_status:
             current = self.download_status[model_id]

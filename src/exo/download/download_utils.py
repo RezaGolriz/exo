@@ -37,7 +37,7 @@ from exo.shared.constants import (
     EXO_MODELS_READ_ONLY_DIRS,
 )
 from exo.shared.models.model_cards import ModelCard, ModelTask
-from exo.shared.types.common import ModelId
+from exo.shared.types.common import InvalidModelIdError, ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import (
     DownloadProgressData,
@@ -241,18 +241,40 @@ async def ensure_cache_dir(model_id: ModelId) -> Path:
 
 async def delete_model(model_id: ModelId) -> bool:
     """Delete a model from writable directories. Skips read-only dirs."""
-    normalized = model_id.normalize()
+    try:
+        normalized = model_id.normalized_for_filesystem()
+    except InvalidModelIdError:
+        safe_model_id = repr(str(model_id)[:120])
+        logger.warning(f"Refusing to delete unsafe model ID {safe_model_id}")
+        return False
+
     deleted = False
     for models_dir in EXO_MODELS_DIRS:
         model_dir = models_dir / normalized
-        if await aios.path.exists(model_dir):
+        if await asyncio.to_thread(model_dir.is_symlink):
+            logger.warning(f"Refusing to delete symlinked model directory {model_dir}")
+            continue
+        try:
             await asyncio.to_thread(shutil.rmtree, model_dir, ignore_errors=False)
             deleted = True
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            logger.opt(exception=error).warning(
+                f"Failed to delete model directory {model_dir}"
+            )
 
     # Clear cache from default dir
     cache_dir = EXO_DEFAULT_MODELS_DIR / "caches" / normalized
-    if await aios.path.exists(cache_dir):
+    if await asyncio.to_thread(cache_dir.is_symlink):
+        logger.warning(f"Refusing to delete symlinked model cache {cache_dir}")
+        return deleted
+    try:
         await asyncio.to_thread(shutil.rmtree, cache_dir, ignore_errors=False)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        logger.opt(exception=error).warning(f"Failed to delete model cache {cache_dir}")
 
     return deleted
 

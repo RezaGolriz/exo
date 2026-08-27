@@ -174,7 +174,13 @@ from exo.shared.types.commands import (
     TaskFinished,
     TextGeneration,
 )
-from exo.shared.types.common import CommandId, Id, NodeId, SystemId
+from exo.shared.types.common import (
+    CommandId,
+    Id,
+    InvalidModelIdError,
+    NodeId,
+    SystemId,
+)
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
@@ -2064,6 +2070,14 @@ class API:
     async def delete_download(
         self, node_id: NodeId, model_id: ModelId
     ) -> DeleteDownloadResponse:
+        try:
+            model_id.normalized_for_filesystem()
+        except InvalidModelIdError as error:
+            raise HTTPException(
+                status_code=HTTPStatus.BAD_REQUEST,
+                detail="Invalid model id",
+            ) from error
+
         command = DeleteDownload(
             target_node_id=node_id,
             model_id=ModelId(model_id),

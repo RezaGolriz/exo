@@ -1,13 +1,15 @@
 import contextlib
 import json
+import os
 from collections import OrderedDict
 from collections.abc import Iterator
 from datetime import datetime, timezone
-from io import BufferedRandom, BufferedReader
+from io import BufferedReader
 from pathlib import Path
 
 import msgspec
 import zstandard
+from filelock import FileLock
 from loguru import logger
 from pydantic import TypeAdapter
 
@@ -73,14 +75,23 @@ class DiskEventLog:
         self._directory = directory
         self._directory.mkdir(parents=True, exist_ok=True)
         self._active_path = directory / "events.bin"
+        self._ownership_lock = FileLock(directory / ".events.lock")
         self._offset_cache: OrderedDict[int, int] = OrderedDict()
         self._count: int = 0
 
-        # Rotate stale active file from a previous session/crash
-        if self._active_path.exists():
-            self._rotate(self._active_path, self._directory)
+        # Construction and close share an inter-process lock so the ownership
+        # check and the subsequent path mutation cannot race a successor.
+        with self._ownership_lock:
+            if self._active_path.exists():
+                self._rotate(self._active_path, self._directory)
 
-        self._file: BufferedRandom = open(self._active_path, "w+b")  # noqa: SIM115
+            flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self._active_path, flags, 0o600)
+            self._file = os.fdopen(fd, "w+b")
+            stat = os.fstat(self._file.fileno())
+            self._active_identity = (stat.st_dev, stat.st_ino)
 
     def _cache_offset(self, idx: int, offset: int) -> None:
         self._offset_cache[idx] = offset
@@ -154,11 +165,35 @@ class DiskEventLog:
         """Close the file and rotate active file to compressed archive."""
         if self._file.closed:
             return
-        self._file.close()
-        if self._active_path.exists() and self._count > 0:
-            self._rotate(self._active_path, self._directory)
-        elif self._active_path.exists():
-            self._active_path.unlink()
+        try:
+            with self._ownership_lock:
+                try:
+                    stat = self._active_path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    logger.warning(
+                        f"Active event log {self._active_path} disappeared before close"
+                    )
+                    return
+                except OSError as error:
+                    logger.opt(exception=error).warning(
+                        f"Could not verify ownership of {self._active_path}"
+                    )
+                    return
+
+                if (stat.st_dev, stat.st_ino) != self._active_identity:
+                    logger.warning(
+                        f"Active event log {self._active_path} belongs to a successor; "
+                        "skipping stale close"
+                    )
+                    return
+                if self._count > 0:
+                    self._rotate(self._active_path, self._directory)
+                else:
+                    self._active_path.unlink()
+        finally:
+            # Keep the descriptor open until after the ownership check so its
+            # inode cannot be recycled into a false-positive identity match.
+            self._file.close()
 
     @staticmethod
     def _rotate(source: Path, directory: Path) -> None:
