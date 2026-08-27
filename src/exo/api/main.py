@@ -211,7 +211,12 @@ from exo.shared.types.worker.instances import (
     InstanceMeta,
     MlxJacclInstance,
 )
-from exo.shared.types.worker.shards import Sharding, TensorShardMetadata
+from exo.shared.types.worker.shards import (
+    CfgShardMetadata,
+    PipelineShardMetadata,
+    Sharding,
+    TensorShardMetadata,
+)
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
@@ -245,11 +250,14 @@ def _resolved_instance_shape(instance: Instance) -> tuple[Sharding, InstanceMeta
     shards = list(instance.shard_assignments.runner_to_shard.values())
     if not shards:
         raise ValueError("Placement produced an instance without shards")
-    sharding = (
-        Sharding.Tensor
-        if all(isinstance(shard, TensorShardMetadata) for shard in shards)
-        else Sharding.Pipeline
-    )
+    if all(isinstance(shard, TensorShardMetadata) for shard in shards):
+        sharding = Sharding.Tensor
+    elif all(
+        isinstance(shard, (PipelineShardMetadata, CfgShardMetadata)) for shard in shards
+    ):
+        sharding = Sharding.Pipeline
+    else:
+        raise ValueError("Placement produced mixed shard metadata")
     return sharding, instance_meta
 
 
@@ -621,9 +629,13 @@ class API:
                 continue
 
             instance = new_instances[0]
-            resolved_sharding, resolved_instance_meta = _resolved_instance_shape(
-                instance
-            )
+            try:
+                resolved_sharding, resolved_instance_meta = _resolved_instance_shape(
+                    instance
+                )
+            except ValueError as exc:
+                logger.warning(f"Could not resolve placement preview shape: {exc}")
+                resolved_sharding, resolved_instance_meta = sharding, instance_meta
             shard_assignments = instance.shard_assignments
             placement_node_ids = list(shard_assignments.node_to_runner.keys())
 
