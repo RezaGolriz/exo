@@ -172,15 +172,9 @@ class TestValidateMediaMatch:
     def test_lookup_truncates_token_identical_prompt_for_different_media(self):
         tokens = mx.arange(30)
         layer_cache = KVCache()
-        layer_cache.update_and_fetch(
-            mx.zeros((1, 1, 30, 1)), mx.zeros((1, 1, 30, 1))
-        )
-        cached_region = MediaRegion(
-            content_hash="hash-a", start_pos=10, end_pos=20
-        )
-        query_region = MediaRegion(
-            content_hash="hash-b", start_pos=10, end_pos=20
-        )
+        layer_cache.update_and_fetch(mx.zeros((1, 1, 30, 1)), mx.zeros((1, 1, 30, 1)))
+        cached_region = MediaRegion(content_hash="hash-a", start_pos=10, end_pos=20)
+        query_region = MediaRegion(content_hash="hash-b", start_pos=10, end_pos=20)
         prefix_cache = KVPrefixCache(None)
         prefix_cache.add_kv_cache(
             tokens,
@@ -202,15 +196,9 @@ class TestValidateMediaMatch:
     def test_update_replaces_media_metadata_after_truncated_match(self):
         tokens = mx.arange(30)
         layer_cache = KVCache()
-        layer_cache.update_and_fetch(
-            mx.zeros((1, 1, 30, 1)), mx.zeros((1, 1, 30, 1))
-        )
-        cached_region = MediaRegion(
-            content_hash="hash-a", start_pos=10, end_pos=20
-        )
-        query_region = MediaRegion(
-            content_hash="hash-b", start_pos=10, end_pos=20
-        )
+        layer_cache.update_and_fetch(mx.zeros((1, 1, 30, 1)), mx.zeros((1, 1, 30, 1)))
+        cached_region = MediaRegion(content_hash="hash-a", start_pos=10, end_pos=20)
+        query_region = MediaRegion(content_hash="hash-b", start_pos=10, end_pos=20)
         prefix_cache = KVPrefixCache(None)
         prefix_cache.add_kv_cache(
             tokens,
