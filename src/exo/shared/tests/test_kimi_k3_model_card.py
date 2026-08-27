@@ -58,7 +58,10 @@ def test_vision_autodetection_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.asyncio
 async def test_builtin_kimi_k3_card_is_tensor_only_and_text_only() -> None:
-    path = Path(__file__).parents[4] / "resources/inference_model_cards/moonshotai--Kimi-K3.toml"
+    path = (
+        Path(__file__).parents[4]
+        / "resources/inference_model_cards/moonshotai--Kimi-K3.toml"
+    )
     card = await ModelCard.load_from_path(path)  # type: ignore[arg-type]
 
     assert card.model_id == ModelId("moonshotai/Kimi-K3")

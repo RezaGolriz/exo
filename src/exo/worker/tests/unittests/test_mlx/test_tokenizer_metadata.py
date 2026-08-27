@@ -98,7 +98,9 @@ def test_qwen38_eos_ids_come_from_metadata_without_name_allowlist(
         json.dumps({"eos_token_id": [248046, 248044]})
     )
 
-    assert get_eos_token_ids_for_model(ModelId("org/renamed-latest-qwen"), tmp_path) == [
+    assert get_eos_token_ids_for_model(
+        ModelId("org/renamed-latest-qwen"), tmp_path
+    ) == [
         248046,
         248044,
     ]
