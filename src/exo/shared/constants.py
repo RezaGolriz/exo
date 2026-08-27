@@ -77,6 +77,7 @@ EXO_PID_FILE = EXO_CACHE_HOME / "exo.pid"
 
 # Identity (config)
 EXO_NODE_ZID = EXO_CACHE_HOME / "node_zid"
+EXO_ELECTION_CLOCK = EXO_DATA_HOME / "election_clock"
 EXO_CONFIG_FILE = EXO_CONFIG_HOME / "config.toml"
 
 # libp2p topics for event forwarding

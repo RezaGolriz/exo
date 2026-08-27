@@ -22,8 +22,14 @@ from exo.download.impl_shard_downloader import exo_shard_downloader
 from exo.master.main import Master
 from exo.routing.event_router import EventRouter
 from exo.routing.router import Router, get_node_zid
-from exo.shared.constants import EXO_DEFAULT_MODELS_DIR, EXO_LOG, EXO_PID_FILE
+from exo.shared.constants import (
+    EXO_DEFAULT_MODELS_DIR,
+    EXO_ELECTION_CLOCK,
+    EXO_LOG,
+    EXO_PID_FILE,
+)
 from exo.shared.election import Election, ElectionResult
+from exo.shared.election_clock import DurableElectionClock
 from exo.shared.logging import logger_cleanup, logger_setup
 from exo.shared.types.common import NodeId, SessionId
 from exo.utils import STDIO_FDS
@@ -52,7 +58,11 @@ class Node:
     @classmethod
     async def create(cls, args: "Args") -> Self:
         node_id = get_node_zid()
-        session_id = SessionId(master_node_id=node_id, election_clock=0)
+        clock_store = DurableElectionClock(EXO_ELECTION_CLOCK)
+        session_id = SessionId(
+            master_node_id=node_id,
+            election_clock=clock_store.mint(observed=0),
+        )
         router = Router.create(
             node_id,
             namespace=args.namespace,
@@ -136,6 +146,8 @@ class Node:
             connection_message_receiver=router.receiver(topics.CONNECTION_MESSAGES),
             command_receiver=router.receiver(topics.COMMANDS),
             election_result_sender=er_send,
+            initial_session=session_id,
+            clock_store=clock_store,
         )
 
         return cls(

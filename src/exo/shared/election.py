@@ -9,6 +9,7 @@ from anyio import (
 from loguru import logger
 
 from exo.routing.connection_message import ConnectionMessage
+from exo.shared.election_clock import ElectionClock
 from exo.shared.types.commands import ForwarderCommand
 from exo.shared.types.common import NodeId, SessionId
 from exo.utils.channels import Receiver, Sender
@@ -55,6 +56,8 @@ class Election:
         election_result_sender: Sender[ElectionResult],
         connection_message_receiver: Receiver[ConnectionMessage],
         command_receiver: Receiver[ForwarderCommand],
+        initial_session: SessionId,
+        clock_store: ElectionClock,
         is_candidate: bool = True,
         seniority: int = 0,
     ):
@@ -62,13 +65,14 @@ class Election:
         # For reference: This node can be elected master if all nodes are not master candidates
         # Any master candidate will automatically win out over this node.
         self.seniority = seniority if is_candidate else -1
-        self.clock = 0
+        if initial_session.master_node_id != node_id:
+            raise ValueError("Initial election session must belong to this node")
+        self.clock = initial_session.election_clock
         self.node_id = node_id
         self.commands_seen = 0
-        # Every node spawns as master
-        self.current_session: SessionId = SessionId(
-            master_node_id=node_id, election_clock=0
-        )
+        self.current_session = initial_session
+        self._clock_store = clock_store
+        self._clock_store.observe(self.clock)
 
         # Senders/Receivers
         self._em_sender = election_message_sender
@@ -81,6 +85,7 @@ class Election:
         self._candidates: list[ElectionMessage] = []
         self._campaign_cancel_scope: CancelScope | None = None
         self._campaign_done: Event | None = None
+        self._last_completed_clock = -1
         self._tg = TaskGroup()
 
     async def run(self):
@@ -135,6 +140,7 @@ class Election:
                 # If a new round is starting, we participate
                 if message.clock > self.clock:
                     self.clock = message.clock
+                    self._clock_store.observe(self.clock)
                     logger.debug(f"New clock: {self.clock}")
                     logger.debug("Starting new campaign")
                     candidates: list[ElectionMessage] = [message]
@@ -153,8 +159,19 @@ class Election:
                     logger.debug(f"Dropping old message: {message}")
                     continue
                 logger.debug(f"Election added candidate {message}")
-                # Now we are processing this rounds messages - including the message that triggered this round.
-                self._candidates.append(message)
+                if self._campaign_cancel_scope is not None:
+                    # We are processing this round, including its trigger message.
+                    self._candidates.append(message)
+                elif message.clock > self._last_completed_clock:
+                    # A restored durable clock may receive a current-round
+                    # candidate before any local campaign has started.
+                    candidates = [message]
+                    self._candidates = candidates
+                    self._tg.start_soon(
+                        self._campaign, candidates, DEFAULT_ELECTION_TIMEOUT
+                    )
+                else:
+                    logger.debug(f"Dropping late completed-round message: {message}")
 
     async def _connection_receiver(self) -> None:
         with self._cm_receiver as connection_messages:
@@ -168,7 +185,7 @@ class Election:
                 )
                 logger.debug(f"Current clock: {self.clock}")
                 # These messages are strictly peer to peer
-                self.clock += 1
+                self.clock = self._clock_store.mint(self.clock)
                 logger.debug(f"New clock: {self.clock}")
                 candidates: list[ElectionMessage] = []
                 self._candidates = candidates
@@ -240,6 +257,7 @@ class Election:
                 )
                 logger.debug("Sending election result")
                 await self.elect(elected)
+                self._last_completed_clock = max(self._last_completed_clock, clock)
                 logger.debug("Election result sent")
         except get_cancelled_exc_class():
             logger.debug(f"Election {clock} cancelled")

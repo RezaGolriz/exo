@@ -3,6 +3,7 @@ from anyio import create_task_group, fail_after, move_on_after
 
 from exo.routing.connection_message import ConnectionMessage
 from exo.shared.election import Election, ElectionMessage, ElectionResult
+from exo.shared.election_clock import InMemoryElectionClock
 from exo.shared.types.commands import ForwarderCommand, TestCommand
 from exo.shared.types.common import NodeId, SessionId, SystemId
 from exo.utils.channels import channel
@@ -70,6 +71,8 @@ async def test_single_round_broadcasts_and_updates_seniority_on_self_win() -> No
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=NodeId("B"), election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
     )
 
@@ -121,6 +124,8 @@ async def test_peer_with_higher_seniority_wins_and_we_switch_master() -> None:
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=NodeId("ME"), election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
     )
 
@@ -175,6 +180,8 @@ async def test_ignores_older_messages() -> None:
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=NodeId("ME"), election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
     )
 
@@ -223,6 +230,8 @@ async def test_two_rounds_emit_two_broadcasts_and_increment_clock() -> None:
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=NodeId("ME"), election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
     )
 
@@ -270,6 +279,8 @@ async def test_promotion_new_seniority_counts_participants() -> None:
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=NodeId("ME"), election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
     )
 
@@ -319,6 +330,8 @@ async def test_connection_message_triggers_new_round_broadcast() -> None:
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=NodeId("ME"), election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
     )
 
@@ -366,6 +379,8 @@ async def test_tie_breaker_prefers_node_with_more_commands_seen() -> None:
         election_result_sender=er_tx,
         connection_message_receiver=cm_rx,
         command_receiver=co_rx,
+        initial_session=SessionId(master_node_id=me, election_clock=0),
+        clock_store=InMemoryElectionClock(),
         is_candidate=True,
         seniority=0,
     )
@@ -402,3 +417,77 @@ async def test_tie_breaker_prefers_node_with_more_commands_seen() -> None:
             em_in_tx.close()
             cm_tx.close()
             co_tx.close()
+
+
+@pytest.mark.anyio
+async def test_equal_clock_candidate_starts_unfinished_round() -> None:
+    em_out_tx, em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    session = SessionId(master_node_id=NodeId("ME"), election_clock=5)
+    election = Election(
+        node_id=NodeId("ME"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        initial_session=session,
+        clock_store=InMemoryElectionClock(5),
+    )
+
+    async with election._tg as tg:  # pyright: ignore[reportPrivateUsage]
+        with fail_after(2):
+            tg.start_soon(
+                election._election_receiver  # pyright: ignore[reportPrivateUsage]
+            )
+            await em_in_tx.send(em(clock=5, seniority=10, node_id="PEER"))
+
+            outbound = await em_out_rx.receive()
+            assert outbound.clock == 5
+            result = await er_rx.receive()
+            assert result.session_id.master_node_id == NodeId("PEER")
+
+            em_in_tx.close()
+
+    cm_tx.close()
+    co_tx.close()
+
+
+@pytest.mark.anyio
+async def test_equal_clock_candidate_after_completed_round_is_dropped() -> None:
+    em_out_tx, em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, _er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+    session = SessionId(master_node_id=NodeId("ME"), election_clock=5)
+    election = Election(
+        node_id=NodeId("ME"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        initial_session=session,
+        clock_store=InMemoryElectionClock(5),
+    )
+    election._last_completed_clock = 5  # pyright: ignore[reportPrivateUsage]
+
+    async with election._tg as tg:  # pyright: ignore[reportPrivateUsage]
+        tg.start_soon(
+            election._election_receiver  # pyright: ignore[reportPrivateUsage]
+        )
+        await em_in_tx.send(em(clock=5, seniority=10, node_id="PEER"))
+
+        received = False
+        with move_on_after(0.05):
+            await em_out_rx.receive()
+            received = True
+        assert not received
+        em_in_tx.close()
+
+    cm_tx.close()
+    co_tx.close()
