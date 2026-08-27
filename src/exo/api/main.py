@@ -205,8 +205,13 @@ from exo.shared.types.text_generation import (
     TextGenerationTaskParams,
 )
 from exo.shared.types.worker.downloads import DownloadCompleted
-from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
-from exo.shared.types.worker.shards import Sharding
+from exo.shared.types.worker.instances import (
+    Instance,
+    InstanceId,
+    InstanceMeta,
+    MlxJacclInstance,
+)
+from exo.shared.types.worker.shards import Sharding, TensorShardMetadata
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
@@ -228,6 +233,24 @@ def _ensure_seed(params: AdvancedImageParams | None) -> AdvancedImageParams:
     if params.seed is None:
         return params.model_copy(update={"seed": random.randint(0, 2**32 - 1)})
     return params
+
+
+def _resolved_instance_shape(instance: Instance) -> tuple[Sharding, InstanceMeta]:
+    """Return the shape placement actually produced after any coercion."""
+    instance_meta = (
+        InstanceMeta.MlxJaccl
+        if isinstance(instance, MlxJacclInstance)
+        else InstanceMeta.MlxRing
+    )
+    shards = list(instance.shard_assignments.runner_to_shard.values())
+    if not shards:
+        raise ValueError("Placement produced an instance without shards")
+    sharding = (
+        Sharding.Tensor
+        if all(isinstance(shard, TensorShardMetadata) for shard in shards)
+        else Sharding.Pipeline
+    )
+    return sharding, instance_meta
 
 
 def _require_disaggregation_enabled() -> None:
@@ -598,6 +621,9 @@ class API:
                 continue
 
             instance = new_instances[0]
+            resolved_sharding, resolved_instance_meta = _resolved_instance_shape(
+                instance
+            )
             shard_assignments = instance.shard_assignments
             placement_node_ids = list(shard_assignments.node_to_runner.keys())
 
@@ -612,15 +638,15 @@ class API:
 
             if (
                 model_card.model_id,
-                sharding,
-                instance_meta,
+                resolved_sharding,
+                resolved_instance_meta,
                 len(placement_node_ids),
             ) not in seen:
                 previews.append(
                     PlacementPreview(
                         model_id=model_card.model_id,
-                        sharding=sharding,
-                        instance_meta=instance_meta,
+                        sharding=resolved_sharding,
+                        instance_meta=resolved_instance_meta,
                         instance=instance,
                         memory_delta_by_node=memory_delta_by_node or None,
                         error=None,
@@ -629,8 +655,8 @@ class API:
             seen.add(
                 (
                     model_card.model_id,
-                    sharding,
-                    instance_meta,
+                    resolved_sharding,
+                    resolved_instance_meta,
                     len(placement_node_ids),
                 )
             )
