@@ -62,6 +62,20 @@ from exo.worker.plan import plan
 from exo.worker.runner.supervisor import RunnerSupervisor
 
 
+def _shutdown_runners(
+    runners: dict[RunnerId, RunnerSupervisor],
+) -> None:
+    """Cancel every runner present when cleanup begins despite map mutations."""
+    while runners:
+        runner_id, runner = runners.popitem()
+        try:
+            runner.shutdown()
+        except Exception as error:
+            logger.opt(exception=error).warning(
+                f"Failed to shut down runner {runner_id} during Worker cleanup"
+            )
+
+
 class Worker:
     def __init__(
         self,
@@ -122,8 +136,7 @@ class Worker:
             self.event_sender.close()
             self.command_sender.close()
             self.download_command_sender.close()
-            for runner in self.runners.values():
-                runner.shutdown()
+            _shutdown_runners(self.runners)
             self._stopped.set()
 
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
