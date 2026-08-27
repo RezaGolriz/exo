@@ -1,6 +1,6 @@
 import json
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import aiofiles
 import aiofiles.os as aios
@@ -39,6 +39,21 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "inference_model_cards",
     Path(RESOURCES_DIR) / "image_model_cards",
 ]
+
+ModelCardErrorCategory = Literal[
+    "invalid_repository",
+    "missing_metadata",
+    "unsupported_architecture",
+    "validation_failed",
+]
+
+
+class ModelCardFetchError(Exception):
+    """An actionable failure while synthesizing a card from a Hugging Face repo."""
+
+    def __init__(self, category: ModelCardErrorCategory, message: str) -> None:
+        super().__init__(message)
+        self.category: ModelCardErrorCategory = category
 
 
 class _CardCache:
@@ -246,22 +261,27 @@ class ModelCard(FrozenModel):
         num_layers = config_data.layer_count
         mem_size_bytes = await fetch_safetensors_size(model_id)
 
-        return ModelCard(
-            model_id=ModelId(model_id),
-            storage_size=mem_size_bytes,
-            n_layers=num_layers,
-            hidden_size=config_data.hidden_size or 0,
-            supports_tensor=config_data.supports_tensor,
-            num_key_value_heads=config_data.num_key_value_heads,
-            context_length=config_data.max_position_embeddings,
-            tasks=[ModelTask.TextGeneration],
-            trust_remote_code=False,
-            is_custom=True,
-            vision=config_data.vision,
-            backends=list(
-                Backend
-            ),  # all backends — we don't know what an arbitrary HF model supports; let placement gate decide
-        )
+        try:
+            return ModelCard(
+                model_id=ModelId(model_id),
+                storage_size=mem_size_bytes,
+                n_layers=num_layers,
+                hidden_size=config_data.hidden_size or 0,
+                supports_tensor=config_data.supports_tensor,
+                num_key_value_heads=config_data.num_key_value_heads,
+                context_length=config_data.max_position_embeddings,
+                tasks=[ModelTask.TextGeneration],
+                trust_remote_code=False,
+                is_custom=True,
+                vision=config_data.vision,
+                backends=list(Backend),
+            )
+        except ValidationError as exc:
+            reason = str(exc) or exc.__class__.__name__
+            raise ModelCardFetchError(
+                "validation_failed",
+                f"'{model_id}' does not have a valid model card: {reason}",
+            ) from exc
 
 
 class ConfigData(BaseModel):
@@ -287,7 +307,6 @@ class ConfigData(BaseModel):
     def supports_tensor(self) -> bool:
         return self.architectures in [
             ["Glm4MoeLiteForCausalLM"],
-            ["GlmMoeDsaForCausalLM"],
             ["DeepseekV4ForCausalLM"],
             ["DeepseekV32ForCausalLM"],
             ["DeepseekV3ForCausalLM"],
@@ -350,19 +369,35 @@ async def fetch_config_data(model_id: ModelId) -> ConfigData:
     )
 
     target_dir = await resolve_model_dir(model_id)
-    config_path = await download_file_with_retry(
-        model_id,
-        "main",
-        "config.json",
-        target_dir,
-        lambda curr_bytes, total_bytes, is_renamed: logger.debug(
-            f"Downloading config.json for {model_id}: {curr_bytes}/{total_bytes} ({is_renamed=})"
-        ),
-    )
-    async with aiofiles.open(config_path, "r") as f:
-        return ConfigData.model_validate_json(
-            await f.read(), context={"model_id": str(model_id)}
+    try:
+        config_path = await download_file_with_retry(
+            model_id,
+            "main",
+            "config.json",
+            target_dir,
+            lambda curr_bytes, total_bytes, is_renamed: logger.debug(
+                f"Downloading config.json for {model_id}: {curr_bytes}/{total_bytes} ({is_renamed=})"
+            ),
         )
+    except FileNotFoundError as exc:
+        reason = str(exc) or exc.__class__.__name__
+        raise ModelCardFetchError(
+            "invalid_repository",
+            f"Could not find config.json for '{model_id}'. Check that the "
+            f"Hugging Face repository is public and spelled correctly: {reason}",
+        ) from exc
+    async with aiofiles.open(config_path, "r") as f:
+        raw_config = await f.read()
+    try:
+        return ConfigData.model_validate_json(
+            raw_config, context={"model_id": str(model_id)}
+        )
+    except ValidationError as exc:
+        reason = str(exc) or exc.__class__.__name__
+        raise ModelCardFetchError(
+            "unsupported_architecture",
+            f"exo could not read the config.json layout for '{model_id}': {reason}",
+        ) from exc
 
 
 async def fetch_safetensors_size(model_id: ModelId) -> Memory:
@@ -374,23 +409,38 @@ async def fetch_safetensors_size(model_id: ModelId) -> Memory:
     from exo.shared.types.worker.downloads import ModelSafetensorsIndex
 
     target_dir = await resolve_model_dir(model_id)
-    index_path = await download_file_with_retry(
-        model_id,
-        "main",
-        "model.safetensors.index.json",
-        target_dir,
-        lambda curr_bytes, total_bytes, is_renamed: logger.debug(
-            f"Downloading model.safetensors.index.json for {model_id}: {curr_bytes}/{total_bytes} ({is_renamed=})"
-        ),
-    )
-    async with aiofiles.open(index_path, "r") as f:
-        index_data = ModelSafetensorsIndex.model_validate_json(await f.read())
+    try:
+        index_path = await download_file_with_retry(
+            model_id,
+            "main",
+            "model.safetensors.index.json",
+            target_dir,
+            lambda curr_bytes, total_bytes, is_renamed: logger.debug(
+                f"Downloading model.safetensors.index.json for {model_id}: {curr_bytes}/{total_bytes} ({is_renamed=})"
+            ),
+        )
+    except FileNotFoundError:
+        index_path = None
 
-    metadata = index_data.metadata
-    if metadata is not None and metadata.total_size is not None:
-        return Memory.from_bytes(metadata.total_size)
+    if index_path is not None:
+        async with aiofiles.open(index_path, "r") as f:
+            index_data = ModelSafetensorsIndex.model_validate_json(await f.read())
+        metadata = index_data.metadata
+        if metadata is not None and metadata.total_size is not None:
+            return Memory.from_bytes(metadata.total_size)
 
-    info = model_info(model_id)
+    try:
+        info = model_info(model_id)
+    except Exception as exc:
+        reason = str(exc) or exc.__class__.__name__
+        raise ModelCardFetchError(
+            "invalid_repository",
+            f"Could not read Hugging Face metadata for '{model_id}': {reason}",
+        ) from exc
     if info.safetensors is None:
-        raise ValueError(f"No safetensors info found for {model_id}")
+        raise ModelCardFetchError(
+            "missing_metadata",
+            f"'{model_id}' has no safetensors weight metadata, so exo cannot "
+            "determine its storage size.",
+        )
     return Memory.from_bytes(info.safetensors.total)

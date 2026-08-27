@@ -1385,7 +1385,8 @@
       let message = `Failed to add model (${response.status}: ${response.statusText})`;
       try {
         const err = await response.json();
-        if (err.detail) message = err.detail;
+        const detail = err?.error?.message ?? err?.detail;
+        if (detail) message = detail;
       } catch {
         // use default message
       }

@@ -419,16 +419,172 @@ def parse_tool_calls(
     tools: list[dict[str, Any]] | None,
 ) -> Generator[GenerationResponse | ToolCallResponse | None]:
     in_tool_call = False
-    tool_call_text_parts: list[str] = []
+    tool_call_text = ""
     accumulated_tool_calls: list[ToolCallItem] = []
+    pending_buffer: list[GenerationResponse] = []
+    accumulated = ""
+    last_response: GenerationResponse | None = None
+
+    def flush_plain_prefix(prefix_length: int):
+        remaining = prefix_length
+        for buffered in pending_buffer:
+            if remaining <= 0:
+                break
+            if len(buffered.text) <= remaining:
+                yield buffered
+                remaining -= len(buffered.text)
+            else:
+                yield buffered.model_copy(
+                    update={
+                        "text": buffered.text[:remaining],
+                        "finish_reason": None,
+                        "stats": None,
+                        "usage": None,
+                    }
+                )
+                remaining = 0
+
+    def parse_completed_call(
+        combined: str, response: GenerationResponse
+    ) -> GenerationResponse | None:
+        parsed = tool_parser.parse(combined.strip(), tools=tools)
+        logger.info(f"parsed tool call text {combined!r} into {parsed=}")
+        if parsed is None:
+            logger.warning(f"tool call parsing failed for text {combined}")
+            return response.model_copy(
+                update={"text": combined, "token": 0, "finish_reason": "error"}
+            )
+        accumulated_tool_calls.extend(parsed)
+        return None
+
+    def consume_completed_calls(
+        text: str, response: GenerationResponse
+    ) -> tuple[GenerationResponse | None, str, bool]:
+        """Parse adjacent complete blocks and return error, trailing text, waiting."""
+        while text.lstrip().startswith(tool_parser.start_parsing):
+            text = text.lstrip()
+            if tool_parser.end_parsing:
+                if tool_parser.end_parsing not in text:
+                    return None, text, True
+                end_index = text.index(tool_parser.end_parsing) + len(
+                    tool_parser.end_parsing
+                )
+            elif response.finish_reason is not None or response.stats is not None:
+                end_index = len(text)
+            else:
+                return None, text, True
+
+            completed = text[:end_index]
+            if (error := parse_completed_call(completed, response)) is not None:
+                return error, "", False
+            text = text[end_index:]
+        return None, text, False
 
     for response in responses:
         if response is None:
             yield None
             continue
+        last_response = response
 
-        if not in_tool_call and response.text.startswith(tool_parser.start_parsing):
-            in_tool_call = True
+        if in_tool_call:
+            tool_call_text += response.text
+            error, trailing, waiting = consume_completed_calls(tool_call_text, response)
+            if error is not None:
+                yield error
+                return
+            if not waiting:
+                in_tool_call = False
+                tool_call_text = ""
+
+                if trailing:
+                    yield response.model_copy(
+                        update={
+                            "text": trailing,
+                            "finish_reason": None,
+                            "stats": None,
+                            "usage": None,
+                        }
+                    )
+                if response.finish_reason is not None or response.stats is not None:
+                    yield ToolCallResponse(
+                        tool_calls=accumulated_tool_calls,
+                        usage=response.usage,
+                        stats=response.stats,
+                    )
+                    accumulated_tool_calls.clear()
+                continue
+            if response.finish_reason is not None:
+                logger.info(
+                    "tool call parsing interrupted, yield partial tool call as text"
+                )
+                yield response.model_copy(
+                    update={
+                        "text": tool_call_text,
+                        "token": 0,
+                        "finish_reason": "error",
+                    }
+                )
+                return
+            continue
+
+        if (
+            not in_tool_call
+            and accumulated_tool_calls
+            and (response.stats is not None or response.finish_reason is not None)
+        ):
+            if response.text:
+                yield response.model_copy(
+                    update={"finish_reason": None, "stats": None, "usage": None}
+                )
+            yield ToolCallResponse(
+                tool_calls=accumulated_tool_calls,
+                usage=response.usage,
+                stats=response.stats,
+            )
+            accumulated_tool_calls.clear()
+            continue
+
+        if not in_tool_call:
+            pending_buffer.append(response)
+            accumulated += response.text
+
+            if tool_parser.start_parsing in accumulated:
+                start_index = accumulated.index(tool_parser.start_parsing)
+                yield from flush_plain_prefix(start_index)
+                tool_call_text = accumulated[start_index:]
+                pending_buffer.clear()
+                accumulated = ""
+                in_tool_call = True
+                error, trailing, waiting = consume_completed_calls(
+                    tool_call_text, response
+                )
+                if error is not None:
+                    yield error
+                    return
+                in_tool_call = waiting
+                if not waiting:
+                    tool_call_text = ""
+                    if trailing:
+                        yield response.model_copy(
+                            update={
+                                "text": trailing,
+                                "finish_reason": None,
+                                "stats": None,
+                                "usage": None,
+                            }
+                        )
+            elif response.finish_reason is not None:
+                yield from pending_buffer
+                pending_buffer.clear()
+                accumulated = ""
+                continue
+            elif _could_be_marker_prefix(accumulated, tool_parser.start_parsing):
+                continue
+            else:
+                yield from pending_buffer
+                pending_buffer.clear()
+                accumulated = ""
+                continue
 
         if (
             not in_tool_call
@@ -443,50 +599,32 @@ def parse_tool_calls(
             accumulated_tool_calls.clear()
             continue
 
-        if not in_tool_call:
-            yield response
+        if in_tool_call:
             continue
 
-        tool_call_text_parts.append(response.text)
-        if response.text.endswith(tool_parser.end_parsing):
-            # parse the actual tool calls from the tool call text
-            combined = "".join(tool_call_text_parts)
-            parsed = tool_parser.parse(combined.strip(), tools=tools)
-            logger.info(f"parsed {tool_call_text_parts=} into {parsed=}")
-            in_tool_call = False
-            tool_call_text_parts = []
-
-            if parsed is None:
-                logger.warning(f"tool call parsing failed for text {combined}")
-                yield response.model_copy(
-                    update={"text": combined, "token": 0, "finish_reason": "error"}
-                )
-                break
-
-            accumulated_tool_calls.extend(parsed)
-            if accumulated_tool_calls and (
-                response.finish_reason is not None or response.stats is not None
-            ):
+    yield from pending_buffer
+    if in_tool_call and last_response is not None:
+        if not tool_parser.end_parsing:
+            if (error := parse_completed_call(tool_call_text, last_response)) is None:
                 yield ToolCallResponse(
                     tool_calls=accumulated_tool_calls,
-                    usage=response.usage,
-                    stats=response.stats,
+                    usage=last_response.usage,
+                    stats=last_response.stats,
                 )
-                accumulated_tool_calls.clear()
-            continue
-
-        if response.finish_reason is not None:
-            logger.info(
-                "tool call parsing interrupted, yield partial tool call as text"
-            )
-            response = response.model_copy(
-                update={
-                    "text": "".join(tool_call_text_parts),
-                    "token": 0,
-                    "finish_reason": "error",
-                }
-            )
-            yield response
-
-    if not accumulated_tool_calls:
+                return
+            yield error
+            return
+        yield last_response.model_copy(
+            update={
+                "text": tool_call_text,
+                "token": 0,
+                "finish_reason": "error",
+            }
+        )
+        return
+    if accumulated_tool_calls:
+        yield ToolCallResponse(
+            tool_calls=accumulated_tool_calls, usage=None, stats=None
+        )
+    elif not in_tool_call:
         logger.warning("Tool calls should have all been emitted but were not")

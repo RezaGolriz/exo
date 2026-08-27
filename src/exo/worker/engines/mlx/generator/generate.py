@@ -54,6 +54,7 @@ from exo.worker.engines.mlx.constants import (
     KV_BITS,
     KV_GROUP_SIZE,
     MAX_TOKENS,
+    PREFILL_STEP_SIZE,
 )
 from exo.worker.engines.mlx.generator.remote_prefill import remote_prefill
 from exo.worker.engines.mlx.types import KVCacheType, Model
@@ -331,17 +332,15 @@ def prefill(
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
-    prefill_step_size = 4096
-
     try:
-        if is_pipeline and num_tokens >= prefill_step_size:
+        if is_pipeline and num_tokens >= PREFILL_STEP_SIZE:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
             pipeline_parallel_prefill(
                 model=model,
                 prompt=prompt_tokens,
                 prompt_cache=cache,
-                prefill_step_size=prefill_step_size,
+                prefill_step_size=PREFILL_STEP_SIZE,
                 kv_group_size=KV_GROUP_SIZE,
                 kv_bits=KV_BITS,
                 prompt_progress_callback=progress_callback,
@@ -358,7 +357,7 @@ def prefill(
                 max_tokens=1,
                 sampler=sampler,
                 prompt_cache=cache,
-                prefill_step_size=prefill_step_size,
+                prefill_step_size=PREFILL_STEP_SIZE,
                 kv_group_size=KV_GROUP_SIZE,
                 kv_bits=KV_BITS,
                 prompt_progress_callback=combined_progress_callback,

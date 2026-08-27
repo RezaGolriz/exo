@@ -47,6 +47,7 @@ from exo.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from exo.shared.types.worker.shards import ShardMetadata
+from exo.utils.disk_usage import filesystem_capacity
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -187,8 +188,8 @@ def select_download_dir(required_bytes: int) -> Path:
         if not candidate_dir.exists():
             continue
         try:
-            usage = shutil.disk_usage(candidate_dir)
-            if usage.free >= required_bytes:
+            _total, available = filesystem_capacity(candidate_dir)
+            if available >= required_bytes:
                 return candidate_dir
         except OSError:
             continue
@@ -214,7 +215,10 @@ async def select_download_dir_for_shard(
             existing_bytes += await get_downloaded_size(sub / file_entry.path)
         remaining = max(total_size - existing_bytes, 0)
         try:
-            if shutil.disk_usage(candidate_dir).free >= remaining:
+            _total, available = await asyncio.to_thread(
+                filesystem_capacity, candidate_dir
+            )
+            if available >= remaining:
                 return candidate_dir
         except OSError:
             continue
@@ -629,6 +633,8 @@ async def file_meta(
                 f"HuggingFace rate limit hit fetching metadata for {model_id}/{path}",
                 retry_after=_parse_retry_after(r.headers),
             )
+        if r.status == 404:
+            raise FileNotFoundError(f"File not found: {url}")
         content_length = int(
             r.headers.get("x-linked-size") or r.headers.get("content-length") or 0
         )

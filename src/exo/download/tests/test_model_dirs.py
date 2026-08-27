@@ -165,17 +165,17 @@ class TestSelectDownloadDir:
         dir1.mkdir()
         dir2.mkdir()
 
-        real_disk_usage = shutil.disk_usage
-
-        def mock_disk_usage(path: str | Path) -> object:
+        def mock_capacity(path: Path) -> tuple[int, int]:
             if Path(path).is_relative_to(dir1):
-                real = real_disk_usage(path)
-                return shutil._ntuple_diskusage(real.total, real.total, 0)  # pyright: ignore[reportPrivateUsage]
-            return real_disk_usage(path)
+                return (10_000, 0)
+            return (10_000, 10_000)
 
         with (
             patch("exo.download.download_utils.EXO_MODELS_DIRS", (dir1, dir2)),
-            patch("shutil.disk_usage", side_effect=mock_disk_usage),
+            patch(
+                "exo.download.download_utils.filesystem_capacity",
+                side_effect=mock_capacity,
+            ),
         ):
             assert select_download_dir(1024) == dir2
 
@@ -183,15 +183,12 @@ class TestSelectDownloadDir:
         dir1 = tmp_path / "dir1"
         dir1.mkdir()
 
-        real_disk_usage = shutil.disk_usage
-
-        def mock_disk_usage(path: str | Path) -> object:
-            real = real_disk_usage(path)
-            return shutil._ntuple_diskusage(real.total, real.total, 0)  # pyright: ignore[reportPrivateUsage]
-
         with (
             patch("exo.download.download_utils.EXO_MODELS_DIRS", (dir1,)),
-            patch("shutil.disk_usage", side_effect=mock_disk_usage),
+            patch(
+                "exo.download.download_utils.filesystem_capacity",
+                return_value=(10_000, 0),
+            ),
             pytest.raises(InsufficientDiskSpaceError),
         ):
             select_download_dir(1024)
@@ -210,16 +207,17 @@ class TestSelectDownloadDir:
         dir1.mkdir()
         dir2.mkdir()
 
-        real_disk_usage = shutil.disk_usage
-
-        def mock_disk_usage(path: str | Path) -> object:
+        def mock_capacity(path: Path) -> tuple[int, int]:
             if Path(path).is_relative_to(dir1):
                 raise OSError("device not mounted")
-            return real_disk_usage(path)
+            return (10_000, 10_000)
 
         with (
             patch("exo.download.download_utils.EXO_MODELS_DIRS", (dir1, dir2)),
-            patch("shutil.disk_usage", side_effect=mock_disk_usage),
+            patch(
+                "exo.download.download_utils.filesystem_capacity",
+                side_effect=mock_capacity,
+            ),
         ):
             assert select_download_dir(1) == dir2
 

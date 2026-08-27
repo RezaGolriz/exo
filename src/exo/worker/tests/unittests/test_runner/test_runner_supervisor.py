@@ -95,3 +95,65 @@ async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> 
     event_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
+
+
+@pytest.mark.anyio
+async def test_runner_stall_detection_requires_inflight_task_and_elapsed_timeout() -> (
+    None
+):
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event | RunnerTerminationError]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-stall"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-stall"),
+        node_id=NodeId("node-stall"),
+    )
+    proc = cast(AsyncProcess, cast(object, _DeadProcess()))
+    handler = await RunnerStdioHandler.create(
+        stdout_rx=proc.stdout, stderr_rx=proc.stderr
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=proc,
+        _runner_stdio_handler=handler,
+        initialize_timeout=400,
+        activity_timeout=60,
+        _ev_recv=ev_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+
+    assert supervisor._runner_stall_error(100) is None  # pyright: ignore[reportPrivateUsage]
+
+    task_id = TaskId("task-stall")
+    task = TextGeneration(
+        task_id=task_id,
+        instance_id=bound_instance.instance.instance_id,
+        command_id=CommandId("cmd-stall"),
+        task_params=TextGenerationTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input=[InputMessage(role="user", content=InputMessageContent("hi"))],
+            stream=True,
+        ),
+    )
+    supervisor.in_progress[task_id] = task
+    supervisor._last_runner_activity = 50  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._runner_stall_error(110) is None  # pyright: ignore[reportPrivateUsage]
+
+    rank_zero_metadata = supervisor.shard_metadata
+    supervisor.shard_metadata = rank_zero_metadata.model_copy(update={"device_rank": 1})
+    assert supervisor._runner_stall_error(1_000) is None  # pyright: ignore[reportPrivateUsage]
+    supervisor.shard_metadata = rank_zero_metadata
+
+    error = supervisor._runner_stall_error(110.1)  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(error, TimeoutError)
+    assert "task-stall" in str(error)
+    assert "EXO_RUNNER_ACTIVITY_TIMEOUT_SECONDS=0" in str(error)
+
+    supervisor.activity_timeout = 0
+    assert supervisor._runner_stall_error(1_000) is None  # pyright: ignore[reportPrivateUsage]

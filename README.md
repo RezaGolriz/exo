@@ -327,6 +327,8 @@ exo supports several environment variables for configuration:
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX_METAL_FAST_SYNCH behavior (for JACCL backend) | Auto |
 | `EXO_TRACING_ENABLED` | Enable distributed tracing for performance analysis | `false` |
+| `EXO_PREFILL_STEP` | MLX prompt-prefill chunk size and threshold for switching pipeline inference to chunked pipeline prefill. Set the same value on every distributed node before starting exo. Smaller values such as `1024` reduce peak memory and may improve RDMA pipeline progress. | `4096` |
+| `EXO_RUNNER_ACTIVITY_TIMEOUT_SECONDS` | Restart the rank-0 runner when it produces no events while generation tasks are active. Rank 0 reports progress for the distributed group, so non-reporting ranks are not timed out independently. Set to `0` to disable. | `300` |
 
 **Example usage:**
 

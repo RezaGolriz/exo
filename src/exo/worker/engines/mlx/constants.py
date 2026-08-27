@@ -1,3 +1,5 @@
+import os
+
 # TODO: Do we want so many constants?
 #  I think we want a lot of these as parameters?
 
@@ -12,6 +14,32 @@ CACHE_GROUP_SIZE: int = 64
 KV_CACHE_BITS: int | None = None
 
 DEFAULT_TOP_LOGPROBS: int = 5
+
+DEFAULT_PREFILL_STEP_SIZE: int = 4096
+PREFILL_STEP_ENV: str = "EXO_PREFILL_STEP"
+
+
+def _parse_prefill_step_size(raw_value: str | None) -> int:
+    """Parse the MLX prefill chunk size used for this worker process."""
+    if raw_value is None:
+        return DEFAULT_PREFILL_STEP_SIZE
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{PREFILL_STEP_ENV} must be a positive integer, got {raw_value!r}"
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            f"{PREFILL_STEP_ENV} must be a positive integer, got {raw_value!r}"
+        )
+    return value
+
+
+PREFILL_STEP_SIZE: int = _parse_prefill_step_size(os.environ.get(PREFILL_STEP_ENV))
+
 
 # TODO: We should really make this opt-in, but Kimi requires trust_remote_code=True
 TRUST_REMOTE_CODE: bool = True

@@ -1,4 +1,3 @@
-import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Self
@@ -7,6 +6,7 @@ import psutil
 
 from exo.shared.types.memory import Memory
 from exo.shared.types.thunderbolt import ThunderboltIdentifier
+from exo.utils.disk_usage import filesystem_capacity
 from exo.utils.pydantic_ext import FrozenModel
 
 
@@ -49,10 +49,10 @@ class DiskUsage(FrozenModel):
     @classmethod
     def from_path(cls, path: Path) -> Self:
         """Get disk usage stats for the partition containing path."""
-        total, _used, free = shutil.disk_usage(path)
+        total, available = filesystem_capacity(path)
         return cls(
             total=Memory.from_bytes(total),
-            available=Memory.from_bytes(free),
+            available=Memory.from_bytes(available),
         )
 
 

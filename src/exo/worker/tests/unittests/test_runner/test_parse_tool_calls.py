@@ -86,6 +86,83 @@ class TestParseToolCalls:
         assert results[0].text == "<tool_call>bad content</tool_call>"
         assert results[0].finish_reason == "error"
 
+    def test_marker_split_across_tokens_is_parsed(self):
+        texts = ["<tool", "_call>", "test_fn", "</tool", "_call>"]
+        results = list(parse_tool_calls(_make_responses(texts), _dummy_parser, None))
+
+        assert len(results) == 1
+        assert isinstance(results[0], ToolCallResponse)
+
+    def test_text_before_inline_marker_is_preserved(self):
+        texts = ["I will check. <tool_call>", "test_fn", "</tool_call>"]
+        results = list(parse_tool_calls(_make_responses(texts), _dummy_parser, None))
+
+        assert len(results) == 2
+        assert isinstance(results[0], GenerationResponse)
+        assert results[0].text == "I will check. "
+        assert isinstance(results[1], ToolCallResponse)
+
+    def test_multiple_tool_call_blocks_are_coalesced(self):
+        texts = [
+            "<tool_call>first</tool_call>",
+            "<tool_call>second</tool_call>",
+            "",
+        ]
+        results = list(parse_tool_calls(_make_responses(texts), _dummy_parser, None))
+
+        assert len(results) == 1
+        assert isinstance(results[0], ToolCallResponse)
+        assert len(results[0].tool_calls) == 2
+
+    def test_multiple_blocks_in_one_token_are_coalesced(self):
+        text = "<tool_call>first</tool_call>\n<tool_call>second</tool_call>"
+        results = list(parse_tool_calls(_make_responses([text]), _dummy_parser, None))
+
+        assert len(results) == 1
+        assert isinstance(results[0], ToolCallResponse)
+        assert len(results[0].tool_calls) == 2
+
+    def test_terminal_text_after_tool_call_is_preserved_before_tool_response(self):
+        texts = ["<tool_call>first</tool_call>", "after"]
+        results = list(parse_tool_calls(_make_responses(texts), _dummy_parser, None))
+
+        assert len(results) == 2
+        assert isinstance(results[0], GenerationResponse)
+        assert results[0].text == "after"
+        assert results[0].finish_reason is None
+        assert isinstance(results[1], ToolCallResponse)
+
+    def test_non_marker_prefix_text_is_not_lost(self):
+        texts = ["normal <tool", "box>", " response"]
+        results = list(parse_tool_calls(_make_responses(texts), _dummy_parser, None))
+
+        assert (
+            "".join(
+                result.text
+                for result in results
+                if isinstance(result, GenerationResponse)
+            )
+            == "normal <toolbox> response"
+        )
+        assert isinstance(results[-1], GenerationResponse)
+        assert results[-1].finish_reason == "stop"
+
+    def test_generator_end_flushes_unclosed_tool_call_as_error(self):
+        def unfinished() -> Generator[GenerationResponse]:
+            yield GenerationResponse(
+                text="<tool_call>partial",
+                token=0,
+                finish_reason=None,
+                usage=None,
+            )
+
+        results = list(parse_tool_calls(unfinished(), _dummy_parser, None))
+
+        assert len(results) == 1
+        assert isinstance(results[0], GenerationResponse)
+        assert results[0].text == "<tool_call>partial"
+        assert results[0].finish_reason == "error"
+
     def test_tool_schema_coerces_string_arguments_to_expected_types(self):
         """Tool argument values should be coerced using provided JSON schema."""
 

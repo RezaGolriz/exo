@@ -345,6 +345,7 @@ class Runner:
             for task_id, result in results:
                 match result:
                     case CancelledResponse():
+                        self.send_task_status(task_id, TaskStatus.Complete)
                         finished.append(task_id)
                     case FinishedResponse():
                         self.send_task_status(task_id, TaskStatus.Complete)

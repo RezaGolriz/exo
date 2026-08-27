@@ -140,6 +140,7 @@ from exo.shared.logging import InterceptLogger
 from exo.shared.models import model_cards
 from exo.shared.models.model_cards import (
     ModelCard,
+    ModelCardFetchError,
     ModelId,
     ModelTask,
 )
@@ -1866,9 +1867,13 @@ class API:
         """Fetch a model from HuggingFace and save as a custom model card, then sync across the cluster."""
         try:
             card = await ModelCard.fetch_from_hf(payload.model_id)
+        except ModelCardFetchError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
+            reason = str(exc) or exc.__class__.__name__
             raise HTTPException(
-                status_code=400, detail=f"Failed to fetch model: {exc}"
+                status_code=400,
+                detail=f"Failed to fetch model '{payload.model_id}': {reason}",
             ) from exc
 
         await self.command_sender.send(

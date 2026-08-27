@@ -18,7 +18,7 @@ from exo.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
     SequentialGenerator,
 )
-from exo.worker.runner.llm_inference.tool_parsers import make_mlx_parser
+from exo.worker.runner.llm_inference.tool_parsers import ToolParser, make_mlx_parser
 
 from .cache import KVPrefixCache
 from .types import Model
@@ -27,6 +27,20 @@ from .utils_mlx import (
     load_mlx_items,
 )
 from .vision import VisionProcessor
+
+
+def _tokenizer_tool_parser(tokenizer: TokenizerWrapper) -> ToolParser | None:
+    if (
+        tokenizer.tool_call_start
+        and tokenizer.tool_call_end is not None
+        and tokenizer.tool_parser  # type: ignore
+    ):
+        return make_mlx_parser(
+            tokenizer.tool_call_start,
+            tokenizer.tool_call_end,
+            tokenizer.tool_parser,  # type: ignore
+        )
+    return None
 
 
 @dataclass
@@ -65,20 +79,10 @@ class MlxBuilder(Builder):
 
         vision_processor = self.vision_processor
 
-        tool_parser = None
         logger.info(
             f"model has_tool_calling={self.tokenizer.has_tool_calling} using tokens {self.tokenizer.tool_call_start}, {self.tokenizer.tool_call_end}"
         )
-        if (
-            self.tokenizer.tool_call_start
-            and self.tokenizer.tool_call_end
-            and self.tokenizer.tool_parser  # type: ignore
-        ):
-            tool_parser = make_mlx_parser(
-                self.tokenizer.tool_call_start,
-                self.tokenizer.tool_call_end,
-                self.tokenizer.tool_parser,  # type: ignore
-            )
+        tool_parser = _tokenizer_tool_parser(self.tokenizer)
 
         kv_prefix_cache = KVPrefixCache(self.group)
 

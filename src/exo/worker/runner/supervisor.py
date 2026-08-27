@@ -1,6 +1,9 @@
 import codecs
 import contextlib
+import math
+import os
 import signal
+import time
 from dataclasses import dataclass, field
 from os import PathLike
 from typing import Callable, Self
@@ -54,8 +57,25 @@ from exo.worker.runner.diagnostics import (
     RunnerUnknown,
 )
 
-PREFILL_TIMEOUT_SECONDS = 60
-DECODE_TIMEOUT_SECONDS = 5
+RUNNER_ACTIVITY_TIMEOUT_ENV = "EXO_RUNNER_ACTIVITY_TIMEOUT_SECONDS"
+DEFAULT_RUNNER_ACTIVITY_TIMEOUT_SECONDS = 300.0
+
+
+def _runner_activity_timeout() -> float:
+    raw = os.environ.get(RUNNER_ACTIVITY_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_RUNNER_ACTIVITY_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{RUNNER_ACTIVITY_TIMEOUT_ENV} must be a non-negative number, got {raw!r}"
+        ) from exc
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError(
+            f"{RUNNER_ACTIVITY_TIMEOUT_ENV} must be non-negative, got {raw!r}"
+        )
+    return timeout
 
 
 @dataclass(eq=False)
@@ -189,6 +209,7 @@ class RunnerSupervisor:
     _task_sender: MpSender[Task]
     _event_sender: Sender[Event]
     _cancel_sender: MpSender[TaskId]
+    activity_timeout: float = field(default_factory=_runner_activity_timeout)
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
     pending: dict[TaskId, anyio.Event] = field(default_factory=dict, init=False)
@@ -198,6 +219,7 @@ class RunnerSupervisor:
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
+    _last_runner_activity: float | None = field(default=None, init=False)
 
     @classmethod
     async def create(
@@ -290,6 +312,7 @@ class RunnerSupervisor:
         event = anyio.Event()
         self.pending[task.task_id] = event
         self.in_progress[task.task_id] = task
+        self._last_runner_activity = time.monotonic()
         try:
             await self._task_sender.send_async(task)
         except ClosedResourceError:
@@ -315,6 +338,7 @@ class RunnerSupervisor:
         if scope.cancel_called:
             logger.error("RunnerSupervisor cancel pipe blocked")
             await self._check_runner(TimeoutError("cancel pipe blocked"))
+            return
 
     async def _forward_events(self):
         try:
@@ -324,6 +348,8 @@ class RunnerSupervisor:
                         # try to get exception if possible
                         await self._check_runner(event)
                         break
+                    if self.in_progress:
+                        self._last_runner_activity = time.monotonic()
                     if isinstance(event, RunnerStatusUpdated):
                         self.status = event.runner_status
                     if isinstance(event, TaskAcknowledged):
@@ -357,9 +383,41 @@ class RunnerSupervisor:
     async def _watch_runner(self) -> None:
         with self._cancel_watch_runner:
             while True:
-                await anyio.sleep(5)
+                interval = (
+                    5.0
+                    if self.activity_timeout <= 0
+                    else min(5.0, max(self.activity_timeout / 4, 0.01))
+                )
+                await anyio.sleep(interval)
                 if not self.runner_process.is_alive():
                     await self._check_runner(RuntimeError("Runner found to be dead"))
+                    return
+                if (stall := self._runner_stall_error(time.monotonic())) is not None:
+                    await self._check_runner(stall)
+                    return
+
+    def _runner_stall_error(self, now: float) -> TimeoutError | None:
+        has_generation_task = any(
+            isinstance(task, (TextGeneration, ImageGeneration, ImageEdits))
+            for task in self.in_progress.values()
+        )
+        if (
+            self.activity_timeout <= 0
+            or self.shard_metadata.device_rank != 0
+            or not has_generation_task
+            or self._last_runner_activity is None
+        ):
+            return None
+        elapsed = now - self._last_runner_activity
+        if elapsed <= self.activity_timeout:
+            return None
+        task_ids = ", ".join(str(task_id) for task_id in self.in_progress)
+        return TimeoutError(
+            "Runner produced no events for "
+            f"{elapsed:.1f}s while tasks were in progress ({task_ids}); "
+            f"terminating the wedged runner. Set {RUNNER_ACTIVITY_TIMEOUT_ENV}=0 "
+            "to disable this watchdog."
+        )
 
     async def _check_runner(
         self, e: RunnerTerminationError | Exception | None = None

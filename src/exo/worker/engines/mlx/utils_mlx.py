@@ -700,6 +700,42 @@ def consolidate_system_messages(
     return formatted_messages
 
 
+def _coerce_chat_template_text(value: object) -> str:
+    """Normalize a chat-template render result to text without dropping parts."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = cast(list[object], value)
+        if len(parts) == 1 and isinstance(parts[0], str):
+            return parts[0]
+        raise TypeError(
+            "tokenizer.apply_chat_template returned a batched result "
+            f"({len(parts)} conversations); expected one rendered prompt"
+        )
+    raise TypeError(
+        "tokenizer.apply_chat_template returned unexpected type "
+        f"{type(value).__name__}; expected str or list[str]"
+    )
+
+
+def _text_only_structured_content(value: object) -> str | None:
+    """Return text from structured content only when every part is text."""
+    if not isinstance(value, list):
+        return None
+    if not value:
+        return ""
+    text_parts: list[str] = []
+    for raw_part in cast(list[object], value):
+        if not isinstance(raw_part, dict):
+            return None
+        part = cast(dict[str, object], raw_part)
+        text = part.get("text")
+        if part.get("type") != "text" or not isinstance(text, str):
+            return None
+        text_parts.append(text)
+    return "".join(text_parts)
+
+
 def render_chat_template(
     tokenizer: TokenizerWrapper,
     messages: list[dict[str, Any]],
@@ -719,8 +755,32 @@ def render_chat_template(
     # For assistant prefilling, append content after templating to avoid a closing turn token.
     partial_assistant_content: str | None = None
     if formatted_messages and formatted_messages[-1].get("role") == "assistant":
-        partial_assistant_content = cast(str, formatted_messages[-1].get("content", ""))
-        formatted_messages = formatted_messages[:-1]
+        last_message = formatted_messages[-1]
+        last_content = cast(
+            ChatTemplateValue | None,
+            last_message.get("content", ""),
+        )
+        has_other_payload = any(
+            last_message.get(key) for key in ("tool_calls", "function_call")
+        )
+        if has_other_payload:
+            pass
+        elif isinstance(last_content, str):
+            partial_assistant_content = last_content
+            formatted_messages = formatted_messages[:-1]
+        elif last_content is None:
+            formatted_messages = formatted_messages[:-1]
+        else:
+            structured_text = _text_only_structured_content(last_content)
+            if structured_text is not None:
+                partial_assistant_content = structured_text
+                formatted_messages = formatted_messages[:-1]
+            else:
+                logger.warning(
+                    "Keeping structured trailing assistant content in the chat "
+                    "template and opening a new assistant turn because media "
+                    "content cannot be safely spliced as an assistant prefill"
+                )
 
     if _needs_dsml_encoding(task_params):
         from exo.worker.engines.mlx.vendor.dsml_encoding import encode_messages
@@ -788,7 +848,6 @@ def render_chat_template(
         extra_kwargs["thinking"] = task_params.enable_thinking
     if task_params.reasoning_effort is not None:
         extra_kwargs["reasoning_effort"] = task_params.reasoning_effort
-
     patched_template: str | None = None
     if task_params.tools:
         original_template: str | None = getattr(tokenizer, "chat_template", None)
@@ -799,7 +858,7 @@ def render_chat_template(
                     "Patched lossy chat template (removed inner_type length guard)"
                 )
 
-    prompt: str = tokenizer.apply_chat_template(
+    rendered_template = tokenizer.apply_chat_template(
         formatted_messages,
         tokenize=False,
         add_generation_prompt=True,
@@ -807,6 +866,7 @@ def render_chat_template(
         **({"chat_template": patched_template} if patched_template is not None else {}),
         **extra_kwargs,
     )
+    prompt = _coerce_chat_template_text(rendered_template)
 
     if task_params.tools and _schemas_lost_in_prompt(prompt, task_params.tools):
         logger.warning("Chat template lost nested tool schemas even after patching")
