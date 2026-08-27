@@ -8,7 +8,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from mlx_vlm.utils import ImageProcessor
@@ -18,7 +18,7 @@ import numpy as np
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from mlx_vlm.prompt_utils import get_message_json
 from mlx_vlm.utils import load_image_processor
-from PIL import Image
+from PIL import Image, ImageOps
 from safetensors import safe_open
 from transformers import AutoImageProcessor
 
@@ -40,6 +40,10 @@ _MLX_VLM_MODEL_TYPE_ALIASES: dict[str, str] = {
     "kimi_k25": "kimi_vl",
     "kimi_k26": "kimi_vl",
 }
+
+
+class _Digest(Protocol):
+    def update(self, data: bytes, /) -> None: ...
 
 
 def _torch_tensor_to_mx(
@@ -127,8 +131,26 @@ def _patch_video_processor() -> None:
 
 def decode_base64_image(b64_data: str) -> Image.Image:
     raw = base64.b64decode(b64_data)
-    img = Image.open(io.BytesIO(raw))
-    return img.convert("RGB")
+    with Image.open(io.BytesIO(raw)) as img:
+        oriented = ImageOps.exif_transpose(img)
+        rgb = oriented.convert("RGB")
+        # Return a detached, metadata-free image so the cache hash and every
+        # downstream processor observe exactly the same canonical input.
+        return Image.frombytes("RGB", rgb.size, rgb.tobytes())
+
+
+def _update_image_hash(digest: _Digest, image: Image.Image) -> None:
+    """Mix an RGB image's shape and pixels into a cryptographic digest."""
+    digest.update(b"exo-vision-rgb-v1\0")
+    digest.update(image.width.to_bytes(8, byteorder="big"))
+    digest.update(image.height.to_bytes(8, byteorder="big"))
+    digest.update(image.tobytes())
+
+
+def _image_content_hash(image: Image.Image) -> str:
+    digest = hashlib.sha256()
+    _update_image_hash(digest, image)
+    return digest.hexdigest()
 
 
 def _format_vlm_messages(
@@ -709,7 +731,7 @@ def _find_media_regions(
     for i, region in enumerate(regions):
         if i < len(images):
             img = decode_base64_image(images[i])
-            region.content_hash = hashlib.sha256(img.tobytes()).hexdigest()
+            region.content_hash = _image_content_hash(img)
         else:
             logger.warning(f"Media region {i} has no corresponding image")
 
@@ -734,11 +756,13 @@ class VisionProcessor:
     def load(self) -> None:
         self._encoder.ensure_loaded()
 
-    def _image_cache_key(self, images: list[Base64Image]) -> str:
+    @staticmethod
+    def _image_cache_key(images: list[Base64Image]) -> str:
         h = hashlib.sha256()
+        h.update(len(images).to_bytes(8, byteorder="big"))
         for img in images:
             pil = decode_base64_image(img)
-            h.update(pil.tobytes())
+            _update_image_hash(h, pil)
         return h.hexdigest()
 
     def process(
